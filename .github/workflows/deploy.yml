@@ -1,0 +1,87 @@
+name: Deploy Zulip
+
+on:
+  push:
+    branches:
+      - "main"
+  workflow_dispatch:
+
+env:
+  SSH_PORT: 2222
+  DEPLOY_USER: root
+  DEPLOY_PATH: /opt/zulip
+  HOST: ${{ secrets.HOST }}
+
+  ZULIP_HOSTNAME: ${{ vars.ZULIP_HOSTNAME }}
+  ZULIP_ADMINISTRATOR: ${{ vars.ZULIP_ADMINISTRATOR }}
+  LOADBALANCER_IPS: ${{ vars.LOADBALANCER_IPS }}
+
+  EMAIL_HOST: ${{ vars.EMAIL_HOST }}
+  EMAIL_HOST_USER: ${{ vars.EMAIL_HOST_USER }}
+  EMAIL_PORT: ${{ vars.EMAIL_PORT }}
+  EMAIL_USE_SSL: ${{ vars.EMAIL_USE_SSL }}
+  EMAIL_USE_TLS: ${{ vars.EMAIL_USE_TLS }}
+
+  POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+  MEMCACHED_PASSWORD: ${{ secrets.MEMCACHED_PASSWORD }}
+  RABBITMQ_DEFAULT_PASS: ${{ secrets.RABBITMQ_DEFAULT_PASS }}
+  REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+  SECRET_KEY: ${{ secrets.SECRET_KEY }}
+  EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create deploy env file
+        run: |
+          set -eu
+          write_var() { printf "%s=%s\n" "$1" "$(printenv "$1")" >> .env; }
+          > .env
+          write_var ZULIP_HOSTNAME
+          write_var ZULIP_ADMINISTRATOR
+          write_var LOADBALANCER_IPS
+          write_var EMAIL_HOST
+          write_var EMAIL_HOST_USER
+          write_var EMAIL_PORT
+          write_var EMAIL_USE_SSL
+          write_var EMAIL_USE_TLS
+          write_var POSTGRES_PASSWORD
+          write_var MEMCACHED_PASSWORD
+          write_var RABBITMQ_DEFAULT_PASS
+          write_var REDIS_PASSWORD
+          write_var SECRET_KEY
+          write_var EMAIL_PASSWORD
+
+      - name: Configure SSH key
+        run: |
+          set -eu
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${SSH_PORT}" -H "${HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Bootstrap remote host
+        run: |
+          set -eu
+
+          ssh_remote() {
+            ssh -p "${SSH_PORT}" "${DEPLOY_USER}@${HOST}" "$@"
+          }
+
+          ssh_remote "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y docker.io docker-compose-v2; systemctl enable --now docker; mkdir -p ${DEPLOY_PATH}"
+
+      - name: Upload deploy files
+        run: |
+          set -eu
+          scp -P "${SSH_PORT}" docker-compose.yml .env "${DEPLOY_USER}@${HOST}:${DEPLOY_PATH}/"
+
+      - name: Deploy Docker Compose stack
+        run: |
+          set -eu
+          ssh -p "${SSH_PORT}" "${DEPLOY_USER}@${HOST}" "cd ${DEPLOY_PATH} && docker compose pull && docker compose run --rm zulip app:init && docker compose up -d --remove-orphans"
